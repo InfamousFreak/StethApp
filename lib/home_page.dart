@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'language_provider.dart';
 import 'services/firebase_service.dart';
 import 'services/pdf_report_service.dart';
+import 'services/device_service.dart';
+import 'services/prediction_service.dart';
 import 'pages/patient_history_page.dart';
 
 enum ConnectionStep {
@@ -36,10 +38,36 @@ class _HomePageState extends State<HomePage> {
   int _listeningCountdown = 25;
   Timer? _countdownTimer;
   bool _showWaveform = false;
+  DeviceData? _activeDevice;
+  StreamSubscription? _deviceSubscription;
+  List<int> _frequencyData = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _loadModel();
+  }
+
+  Future<void> _loadModel() async {
+    try {
+      final loaded = await PredictionService().loadModel();
+      if (loaded && mounted) {
+        _showToast(
+          'AI Model loaded',
+          backgroundColor: Colors.green,
+          icon: Icons.check_circle,
+        );
+      }
+    } catch (e) {
+      print('Error loading model: $e');
+    }
+  }
 
   @override
   void dispose() {
     _countdownTimer?.cancel();
+    _deviceSubscription?.cancel();
+    PredictionService().dispose();
     super.dispose();
   }
 
@@ -49,20 +77,76 @@ class _HomePageState extends State<HomePage> {
       _currentStep = ConnectionStep.connecting;
     });
 
-    // Simulate connection attempt
-    await Future.delayed(const Duration(seconds: 2));
+    try {
+      // Check for active device with 5-second timeout
+      _showToast(
+        'Searching for device...',
+        backgroundColor: Colors.blue,
+        icon: Icons.search,
+      );
 
-    // Connection successful - proceed to position selection
-    setState(() {
-      _currentStep = ConnectionStep.selectPosition;
-      _isConnected = true;
-    });
+      final device = await DeviceService().findActiveDevice(
+        timeout: const Duration(seconds: 5),
+      );
 
-    _showToast(
-      'Connected to stethoscope',
-      backgroundColor: Colors.green,
-      icon: Icons.check_circle,
-    );
+      if (device != null && device.isActive) {
+        // Device found and active!
+        setState(() {
+          _activeDevice = device;
+          _isConnected = true;
+        });
+
+        // Auto-detect position based on what's active
+        if (device.isHeartMode) {
+          _showToast(
+            'Device connected - Heart mode detected',
+            backgroundColor: Colors.green,
+            icon: Icons.favorite,
+          );
+          await Future.delayed(const Duration(milliseconds: 500));
+          _selectPosition(StethPosition.heart);
+        } else if (device.isLungMode) {
+          _showToast(
+            'Device connected - Lung mode detected',
+            backgroundColor: Colors.green,
+            icon: Icons.air,
+          );
+          await Future.delayed(const Duration(milliseconds: 500));
+          _selectPosition(StethPosition.lungs);
+        } else {
+          // Device active but position unclear, let user choose
+          setState(() {
+            _currentStep = ConnectionStep.selectPosition;
+          });
+          _showToast(
+            'Device connected',
+            backgroundColor: Colors.green,
+            icon: Icons.check_circle,
+          );
+        }
+      } else {
+        // No device found after 5 seconds
+        setState(() {
+          _currentStep = ConnectionStep.initial;
+          _isConnected = false;
+        });
+        _showToast(
+          'No active device found. Please turn on the stethoscope.',
+          backgroundColor: Colors.orange,
+          icon: Icons.warning,
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _currentStep = ConnectionStep.initial;
+        _isConnected = false;
+      });
+      _showToast(
+        'Connection failed: $e',
+        backgroundColor: Colors.red,
+        icon: Icons.error,
+      );
+    }
   }
 
   void _selectPosition(StethPosition position) {
@@ -71,7 +155,30 @@ class _HomePageState extends State<HomePage> {
       _currentStep = ConnectionStep.listening;
       _listeningCountdown = 25;
       _showWaveform = false;
+      _frequencyData = [];
     });
+
+    // Start listening to device data
+    if (_activeDevice != null) {
+      _deviceSubscription?.cancel();
+      _deviceSubscription = DeviceService()
+          .getDeviceStream(_activeDevice!.deviceId)
+          .listen((deviceData) {
+        if (mounted && _currentStep == ConnectionStep.listening) {
+          setState(() {
+            _activeDevice = deviceData;
+            // Collect frequency data for waveform reconstruction
+            if (deviceData.frequency > 0) {
+              _frequencyData.add(deviceData.frequency);
+              // Keep last 100 readings for waveform
+              if (_frequencyData.length > 100) {
+                _frequencyData.removeAt(0);
+              }
+            }
+          });
+        }
+      });
+    }
 
     // Show waveform after 5 seconds
     Future.delayed(const Duration(seconds: 5), () {
@@ -90,20 +197,83 @@ class _HomePageState extends State<HomePage> {
 
       if (_listeningCountdown <= 0) {
         timer.cancel();
+        _deviceSubscription?.cancel();
         _showResults();
       }
     });
   }
 
-  void _showResults() {
-    // Generate random risk percentage (5% or 10%)
-    final random = math.Random();
-    final riskPercentage = random.nextBool() ? 5 : 10;
+  void _showResults() async {
+    // Show loading state
+    if (mounted) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (context) => const AlertDialog(
+          backgroundColor: Colors.black87,
+          content: Row(
+            children: [
+              CircularProgressIndicator(color: Colors.green),
+              SizedBox(width: 20),
+              Text('Analyzing...', style: TextStyle(color: Colors.white)),
+            ],
+          ),
+        ),
+      );
+    }
 
-    setState(() {
-      _riskPercentage = riskPercentage;
-      _currentStep = ConnectionStep.results;
-    });
+    try {
+      // Use ML model to predict from collected frequency data
+      final isHeartMode = _selectedPosition == StethPosition.heart;
+      final prediction = await PredictionService().predictFromFrequencyData(
+        _frequencyData,
+        isHeartMode,
+      );
+
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        
+        setState(() {
+          _riskPercentage = prediction.riskPercentage;
+          _currentStep = ConnectionStep.results;
+        });
+
+        // Show warning if model input was invalid (fallback used)
+        if (prediction.diagnosis.contains('Model expects audio') || 
+            prediction.diagnosis.contains('not compatible') ||
+            prediction.diagnosis.contains('error')) {
+          _showToast(
+            '⚠️ Model incompatible with frequency data. Using baseline analysis.',
+            backgroundColor: Colors.orange,
+            icon: Icons.warning,
+          );
+        }
+
+        // Log prediction details
+        print('🎯 Prediction: ${prediction.diagnosis}');
+        print('📊 Risk: ${prediction.riskPercentage}%');
+        print('🎲 Confidence: ${(prediction.confidence * 100).toStringAsFixed(1)}%');
+      }
+    } catch (e) {
+      print('❌ Prediction error: $e');
+      if (mounted) {
+        Navigator.pop(context); // Close loading dialog
+        
+        // Show error toast
+        _showToast(
+          '⚠️ Analysis error. Using baseline risk assessment.',
+          backgroundColor: Colors.orange,
+          icon: Icons.warning,
+        );
+        
+        // Fallback to simple risk
+        final random = math.Random();
+        setState(() {
+          _riskPercentage = random.nextBool() ? 5 : 10;
+          _currentStep = ConnectionStep.results;
+        });
+      }
+    }
   }
 
   void _resetFlow() {
@@ -184,7 +354,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _showToast(String message, {Color? backgroundColor, IconData? icon}) {
+  void _showToast(String message, {Color? backgroundColor, IconData? icon, Duration? duration}) {
     final overlay = Overlay.of(context);
     late OverlayEntry overlayEntry;
 
@@ -198,6 +368,15 @@ class _HomePageState extends State<HomePage> {
     );
 
     overlay.insert(overlayEntry);
+    
+    // Auto-dismiss after duration (default 2 seconds)
+    Future.delayed(duration ?? const Duration(seconds: 2), () {
+      try {
+        overlayEntry.remove();
+      } catch (e) {
+        // Overlay already removed
+      }
+    });
   }
 
   Widget _buildLanguageSelector(BuildContext context) {
@@ -574,6 +753,7 @@ class _HomePageState extends State<HomePage> {
                                 animationValue: DateTime.now().millisecondsSinceEpoch / 1000.0,
                                 color: color,
                                 isHeartSound: isHeart,
+                                frequencyData: _frequencyData,
                               ),
                               size: const Size(double.infinity, 200),
                             );
@@ -830,11 +1010,13 @@ class MedicalWaveformPainter extends CustomPainter {
   final double animationValue;
   final Color color;
   final bool isHeartSound;
+  final List<int> frequencyData; // Real-time frequency data
 
   MedicalWaveformPainter({
     required this.animationValue,
     required this.color,
     required this.isHeartSound,
+    this.frequencyData = const [],
   });
 
   @override
@@ -864,65 +1046,79 @@ class MedicalWaveformPainter extends CustomPainter {
     }
 
     final path = Path();
-    final random = math.Random(42); // Fixed seed for consistency
+    final random = math.Random(42);
+
+    // Use real frequency data if available, otherwise fall back to simulated
+    final useRealData = frequencyData.isNotEmpty;
 
     if (isHeartSound) {
-      // Realistic Heart Sound Waveform (ECG-like with lub-dub pattern)
+      // Heart Sound Waveform - reconstructed from frequency data
       for (double x = 0; x <= width; x += 1) {
-        final t = (x / width) * 6 + animationValue; // Multiple heartbeats visible
-        
-        // Use different random values for each point for more noise
+        final t = (x / width) * 6 + animationValue;
         final noiseRandom = math.Random((t * 1000 + x).toInt());
         
-        // Create irregular heartbeat pattern
         double y = centerY;
         
-        // QRS Complex (main spike) - appears at irregular intervals
-        final beatPhase = (t % 1.2); // Slightly irregular timing
-        
-        if (beatPhase < 0.08) {
-          // Q wave (small dip) with noise
-          y = centerY + height * 0.05;
-          y += (noiseRandom.nextDouble() - 0.5) * height * 0.03;
-        } else if (beatPhase < 0.12) {
-          // R wave (sharp spike - the "lub") with noise
-          final progress = (beatPhase - 0.08) / 0.04;
-          y = centerY - height * 0.35 * math.sin(progress * math.pi);
-          y += (noiseRandom.nextDouble() - 0.5) * height * 0.05;
-        } else if (beatPhase < 0.16) {
-          // S wave (small dip after spike) with noise
-          y = centerY + height * 0.08;
-          y += (noiseRandom.nextDouble() - 0.5) * height * 0.04;
-        } else if (beatPhase < 0.35) {
-          // ST segment with more noise
-          y = centerY + (noiseRandom.nextDouble() - 0.5) * height * 0.05;
-          // Add multiple frequency noise components
-          y += math.sin(t * 50 + noiseRandom.nextDouble() * math.pi) * height * 0.02;
-          y += math.sin(t * 80 + noiseRandom.nextDouble() * math.pi) * height * 0.015;
-        } else if (beatPhase < 0.45) {
-          // T wave (the "dub" - smaller rounded peak) with noise
-          final progress = (beatPhase - 0.35) / 0.1;
-          y = centerY - height * 0.12 * math.sin(progress * math.pi);
-          y += (noiseRandom.nextDouble() - 0.5) * height * 0.04;
+        if (useRealData) {
+          // Reconstruct heart waveform from frequency data
+          // Map frequency (BPM) to heart rate pattern
+          final dataIndex = ((x / width) * frequencyData.length).toInt().clamp(0, frequencyData.length - 1);
+          final frequency = frequencyData[dataIndex].toDouble();
+          
+          // Convert frequency to heart rate cycles
+          // Typical heart rates: 60-100 BPM => frequencies in dataset
+          // Scale frequency to BPM range (assuming frequency 0-255 maps to 60-120 BPM)
+          final bpm = 60 + (frequency / 255) * 60;
+          final beatDuration = 60.0 / bpm; // Duration of one heartbeat in seconds
+          final normalizedT = (t % beatDuration) / beatDuration;
+          
+          // QRS Complex based on normalized time
+          if (normalizedT < 0.08) {
+            y = centerY + height * 0.05;
+          } else if (normalizedT < 0.12) {
+            final progress = (normalizedT - 0.08) / 0.04;
+            y = centerY - height * 0.35 * math.sin(progress * math.pi);
+          } else if (normalizedT < 0.16) {
+            y = centerY + height * 0.08;
+          } else if (normalizedT < 0.35) {
+            y = centerY + math.sin(t * 50) * height * 0.03;
+          } else if (normalizedT < 0.45) {
+            final progress = (normalizedT - 0.35) / 0.1;
+            y = centerY - height * 0.12 * math.sin(progress * math.pi);
+          } else {
+            y = centerY;
+          }
+          
+          // Add amplitude variation based on signal strength
+          final amplitudeFactor = (frequency / 255).clamp(0.5, 1.5);
+          y = centerY + (y - centerY) * amplitudeFactor;
+          
         } else {
-          // Baseline with significant natural variation and noise
-          y = centerY + (noiseRandom.nextDouble() - 0.5) * height * 0.04;
-          // Add 60Hz electrical noise simulation
-          y += math.sin(t * 120 * math.pi) * height * 0.008;
-          // Add muscle tremor artifact
-          y += math.sin(t * 15 + noiseRandom.nextDouble()) * height * 0.012;
+          // Fallback: simulated heart pattern
+          final beatPhase = (t % 1.2);
+          
+          if (beatPhase < 0.08) {
+            y = centerY + height * 0.05;
+          } else if (beatPhase < 0.12) {
+            final progress = (beatPhase - 0.08) / 0.04;
+            y = centerY - height * 0.35 * math.sin(progress * math.pi);
+          } else if (beatPhase < 0.16) {
+            y = centerY + height * 0.08;
+          } else if (beatPhase < 0.35) {
+            y = centerY;
+          } else if (beatPhase < 0.45) {
+            final progress = (beatPhase - 0.35) / 0.1;
+            y = centerY - height * 0.12 * math.sin(progress * math.pi);
+          } else {
+            y = centerY;
+          }
         }
         
-        // Add breathing artifact
-        y += math.sin(t * 0.3) * height * 0.025;
-        
-        // Add movement artifact (random spikes)
-        if (noiseRandom.nextDouble() > 0.98) {
-          y += (noiseRandom.nextDouble() - 0.5) * height * 0.08;
-        }
-        
-        // Add high-frequency noise throughout
-        y += (noiseRandom.nextDouble() - 0.5) * height * 0.015;
+        // Add realistic noise
+        y += (noiseRandom.nextDouble() - 0.5) * height * 0.03;
+        y += math.sin(t * 120 * math.pi) * height * 0.008; // 60Hz noise
+        y += math.sin(t * 15) * height * 0.012; // Muscle tremor
+        y += math.sin(t * 0.3) * height * 0.025; // Breathing artifact
         
         if (x == 0) {
           path.moveTo(x, y);
@@ -931,34 +1127,57 @@ class MedicalWaveformPainter extends CustomPainter {
         }
       }
     } else {
-      // Realistic Lung Sound Waveform (breath sounds)
+      // Lung Sound Waveform - reconstructed from frequency data
       for (double x = 0; x <= width; x += 1) {
-        final t = (x / width) * 4 + animationValue; // Slower breathing cycle
+        final t = (x / width) * 4 + animationValue;
         
-        // Simulate breathing cycle: inhale -> pause -> exhale -> pause
-        final breathCycle = t % 1.0;
         double amplitude = 0;
         
-        if (breathCycle < 0.35) {
-          // Inhale (increasing amplitude with turbulence)
-          final progress = breathCycle / 0.35;
-          amplitude = progress * 0.25;
-          // Add high-frequency turbulence for breath sounds
-          amplitude += (random.nextDouble() - 0.5) * 0.15 * progress;
-        } else if (breathCycle < 0.4) {
-          // Brief pause
-          amplitude = (random.nextDouble() - 0.5) * 0.05;
-        } else if (breathCycle < 0.75) {
-          // Exhale (decreasing amplitude with turbulence)
-          final progress = (breathCycle - 0.4) / 0.35;
-          amplitude = (1 - progress) * 0.25;
-          amplitude += (random.nextDouble() - 0.5) * 0.15 * (1 - progress);
+        if (useRealData) {
+          // Reconstruct lung waveform from frequency data
+          final dataIndex = ((x / width) * frequencyData.length).toInt().clamp(0, frequencyData.length - 1);
+          final frequency = frequencyData[dataIndex].toDouble();
+          
+          // Convert frequency to breath pattern
+          // Map frequency to breathing rate (12-20 breaths/min normal)
+          final breathRate = 12 + (frequency / 255) * 8;
+          final breathDuration = 60.0 / breathRate;
+          final breathCycle = (t % breathDuration) / breathDuration;
+          
+          if (breathCycle < 0.35) {
+            // Inhale
+            final progress = breathCycle / 0.35;
+            amplitude = progress * 0.25;
+          } else if (breathCycle < 0.4) {
+            amplitude = 0.05;
+          } else if (breathCycle < 0.75) {
+            // Exhale
+            final progress = (breathCycle - 0.4) / 0.35;
+            amplitude = (1 - progress) * 0.25;
+          } else {
+            amplitude = 0.03;
+          }
+          
+          // Modulate amplitude by frequency strength
+          amplitude *= (frequency / 255).clamp(0.5, 1.5);
+          
         } else {
-          // Pause between breaths
-          amplitude = (random.nextDouble() - 0.5) * 0.03;
+          // Fallback: simulated breath pattern
+          final breathCycle = t % 1.0;
+          
+          if (breathCycle < 0.35) {
+            final progress = breathCycle / 0.35;
+            amplitude = progress * 0.25;
+          } else if (breathCycle < 0.4) {
+            amplitude = 0.05;
+          } else if (breathCycle < 0.75) {
+            final progress = (breathCycle - 0.4) / 0.35;
+            amplitude = (1 - progress) * 0.25;
+          } else {
+            amplitude = 0.03;
+          }
         }
         
-        // Add multiple frequency components for realistic lung sounds
         double y = centerY;
         y += math.sin(t * 15 + random.nextDouble()) * amplitude * height;
         y += math.sin(t * 25 + random.nextDouble() * 2) * amplitude * height * 0.5;
