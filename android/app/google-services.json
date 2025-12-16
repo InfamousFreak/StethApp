@@ -1,14 +1,14 @@
 {
   "project_info": {
-    "project_number": "736938960658",
-    "firebase_url": "https://scope-ff203-default-rtdb.firebaseio.com",
-    "project_id": "scope-ff203",
-    "storage_bucket": "scope-ff203.firebasestorage.app"
+    "project_number": "236858446400",
+    "firebase_url": "https://ai-stethoscope-60bf9-default-rtdb.firebaseio.com",
+    "project_id": "ai-stethoscope-60bf9",
+    "storage_bucket": "ai-stethoscope-60bf9.firebasestorage.app"
   },
   "client": [
     {
       "client_info": {
-        "mobilesdk_app_id": "1:736938960658:android:d863a96f28623667b035cb",
+        "mobilesdk_app_id": "1:236858446400:android:a70864ad6ea2aaa45c05a5",
         "android_client_info": {
           "package_name": "com.stethapp.medical"
         }
@@ -16,26 +16,7 @@
       "oauth_client": [],
       "api_key": [
         {
-          "current_key": "AIzaSyBcmcYn1ezsIPaVXyX-E3BpnrWyed179WY"
-        }
-      ],
-      "services": {
-        "appinvite_service": {
-          "other_platform_oauth_client": []
-        }
-      }
-    },
-    {
-      "client_info": {
-        "mobilesdk_app_id": "1:736938960658:android:3ae8e462cb0b2369b035cb",
-        "android_client_info": {
-          "package_name": "scope.com"
-        }
-      },
-      "oauth_client": [],
-      "api_key": [
-        {
-          "current_key": "AIzaSyBcmcYn1ezsIPaVXyX-E3BpnrWyed179WY"
+          "current_key": "AIzaSyBzv6bRSPEPs3qBDt5DrLp2AF0Z8o-IRyQ"
         }
       ],
       "services": {

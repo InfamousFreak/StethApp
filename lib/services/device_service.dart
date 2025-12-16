@@ -3,9 +3,9 @@ import 'dart:async';
 
 class DeviceData {
   final bool heartActive;
-  final int heartLevel;
+  final double heartLevel;
   final bool lungActive;
-  final int lungLevel;
+  final double lungLevel;
   final int timestamp;
   final String deviceId;
 
@@ -21,11 +21,11 @@ class DeviceData {
   factory DeviceData.fromSnapshot(DataSnapshot snapshot, String deviceId) {
     final data = snapshot.value as Map<dynamic, dynamic>?;
     return DeviceData(
-      heartActive: data?['heart_active'] ?? false,
-      heartLevel: data?['heart_level'] ?? 0,
-      lungActive: data?['lung_active'] ?? false,
-      lungLevel: data?['lung_level'] ?? 0,
-      timestamp: data?['timestamp'] ?? 0,
+      heartActive: data?['heart_detect'] ?? false,
+      heartLevel: (data?['heart_rms'] ?? 0.0).toDouble(),
+      lungActive: data?['lung_detect'] ?? false,
+      lungLevel: (data?['lung_rms'] ?? 0.0).toDouble(),
+      timestamp: data?['ts'] ?? 0,
       deviceId: deviceId,
     );
   }
@@ -34,7 +34,7 @@ class DeviceData {
   bool get isHeartMode => heartActive && !lungActive;
   bool get isLungMode => lungActive && !heartActive;
   
-  int get frequency => heartActive ? heartLevel : lungLevel;
+  int get frequency => heartActive ? (heartLevel * 1000).toInt() : (lungLevel * 1000).toInt();
 }
 
 class DeviceService {
@@ -53,7 +53,7 @@ class DeviceService {
 
       return data.entries.map((entry) {
         final deviceId = entry.key as String;
-        final deviceSnapshot = event.snapshot.child(deviceId);
+        final deviceSnapshot = event.snapshot.child('$deviceId/data');
         return DeviceData.fromSnapshot(deviceSnapshot, deviceId);
       }).toList();
     });
@@ -61,7 +61,7 @@ class DeviceService {
 
   // Listen to a specific device
   Stream<DeviceData> getDeviceStream(String deviceId) {
-    return _database.child('devices/$deviceId').onValue.map((event) {
+    return _database.child('devices/$deviceId/data').onValue.map((event) {
       return DeviceData.fromSnapshot(event.snapshot, deviceId);
     });
   }

@@ -7,6 +7,7 @@ import 'services/pdf_report_service.dart';
 import 'services/device_service.dart';
 import 'services/prediction_service.dart';
 import 'pages/patient_history_page.dart';
+import 'pages/test_firebase_page.dart';
 
 enum ConnectionStep {
   initial,
@@ -41,6 +42,10 @@ class _HomePageState extends State<HomePage> {
   DeviceData? _activeDevice;
   StreamSubscription? _deviceSubscription;
   List<int> _frequencyData = [];
+  List<double> _rmsData = []; // Store raw RMS values from stream
+  bool _demoMode = false; // Disable demo mode - using real Firebase data
+  bool _hasHeartData = false; // Track if heart test is done
+  bool _hasLungData = false; // Track if lung test is done
 
   @override
   void initState() {
@@ -72,6 +77,20 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _connectViaWiFi() async {
+    // DEMO MODE: Skip actual connection
+    if (_demoMode) {
+      setState(() {
+        _currentStep = ConnectionStep.selectPosition;
+        _isConnected = true;
+      });
+      _showToast(
+        'Demo Mode: Connection simulated',
+        backgroundColor: Colors.green,
+        icon: Icons.check_circle,
+      );
+      return;
+    }
+
     // Show connecting state
     setState(() {
       _currentStep = ConnectionStep.connecting;
@@ -156,7 +175,33 @@ class _HomePageState extends State<HomePage> {
       _listeningCountdown = 25;
       _showWaveform = false;
       _frequencyData = [];
+      _rmsData = []; // Clear RMS data
     });
+
+    // Track which tests have been done
+    if (position == StethPosition.heart) {
+      _hasHeartData = true;
+    } else {
+      _hasLungData = true;
+    }
+
+    // DEMO MODE: Skip to results after short delay
+    if (_demoMode) {
+      _listeningCountdown = 3; // Short countdown for demo
+      _showWaveform = true;
+      
+      _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+        setState(() {
+          _listeningCountdown--;
+        });
+
+        if (_listeningCountdown <= 0) {
+          timer.cancel();
+          _showResults();
+        }
+      });
+      return;
+    }
 
     // Start listening to device data
     if (_activeDevice != null) {
@@ -167,13 +212,30 @@ class _HomePageState extends State<HomePage> {
         if (mounted && _currentStep == ConnectionStep.listening) {
           setState(() {
             _activeDevice = deviceData;
-            // Collect frequency data for waveform reconstruction
-            if (deviceData.frequency > 0) {
-              _frequencyData.add(deviceData.frequency);
-              // Keep last 100 readings for waveform
-              if (_frequencyData.length > 100) {
+            
+            // Collect RMS and frequency data from the stream
+            final rmsValue = _selectedPosition == StethPosition.heart 
+                ? deviceData.heartLevel 
+                : deviceData.lungLevel;
+            
+            // DEBUG: Print fetched data
+            print('🔊 [${_selectedPosition == StethPosition.heart ? "HEART" : "LUNG"}] RMS: $rmsValue | heart_active: ${deviceData.heartActive} | lung_active: ${deviceData.lungActive}');
+            
+            if (rmsValue > 0) {
+              _rmsData.add(rmsValue);
+              _frequencyData.add((rmsValue * 1000).toInt());
+              
+              print('📊 Data collected: ${_rmsData.length} samples | Latest RMS: $rmsValue | Frequency: ${(rmsValue * 1000).toInt()}');
+              
+              // Keep last 200 readings for analysis
+              if (_rmsData.length > 200) {
+                _rmsData.removeAt(0);
+              }
+              if (_frequencyData.length > 200) {
                 _frequencyData.removeAt(0);
               }
+            } else {
+              print('⚠️ RMS value is 0 or negative, skipping...');
             }
           });
         }
@@ -204,6 +266,14 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _showResults() async {
+    // DEMO MODE: Skip ML inference
+    if (_demoMode) {
+      setState(() {
+        _currentStep = ConnectionStep.results;
+      });
+      return;
+    }
+
     // Show loading state
     if (mounted) {
       showDialog(
@@ -463,6 +533,18 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       body: _buildBody(),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => const TestFirebasePage(),
+            ),
+          );
+        },
+        tooltip: 'Test Firebase Data',
+        child: const Icon(Icons.bug_report),
+      ),
     );
   }
 
@@ -700,6 +782,122 @@ class _HomePageState extends State<HomePage> {
                 ),
               ),
               const SizedBox(height: 12),
+              
+              // Real-time frequency level display (for testing)
+              if (_activeDevice != null) ...[
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 8),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade900.withOpacity(0.6),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: color.withOpacity(0.5)),
+                  ),
+                  child: Column(
+                    children: [
+                      Text(
+                        'Live Firebase Data',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey.shade400,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                        children: [
+                          Column(
+                            children: [
+                              Text(
+                                'Heart RMS',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey.shade500,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                _activeDevice!.heartLevel.toStringAsFixed(6),
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: _activeDevice!.heartActive 
+                                      ? Colors.red 
+                                      : Colors.grey.shade600,
+                                ),
+                              ),
+                              Text(
+                                _activeDevice!.heartActive ? '✓ Detect' : '✗ No',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: _activeDevice!.heartActive 
+                                      ? Colors.green 
+                                      : Colors.grey.shade600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          Container(
+                            height: 50,
+                            width: 1,
+                            color: Colors.grey.shade700,
+                          ),
+                          Column(
+                            children: [
+                              Text(
+                                'Lung RMS',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: Colors.grey.shade500,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                _activeDevice!.lungLevel.toStringAsFixed(6),
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: _activeDevice!.lungActive 
+                                      ? Colors.blue 
+                                      : Colors.grey.shade600,
+                                ),
+                              ),
+                              Text(
+                                _activeDevice!.lungActive ? '✓ Detect' : '✗ No',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  color: _activeDevice!.lungActive 
+                                      ? Colors.green 
+                                      : Colors.grey.shade600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.black45,
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          'Samples: ${_rmsData.length}/200 | Freq: ${_frequencyData.isNotEmpty ? _frequencyData.last : 0}',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: Colors.grey.shade400,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -862,7 +1060,282 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _buildDemoResultsScreen() {
+    final positionText = _selectedPosition == StethPosition.lungs ? 'Lungs' : 'Heart';
+    final random = math.Random();
+    
+    // Generate random demo risks (0%, 5%, or 10%)
+    final riskOptions = [0, 5, 10];
+    final pneumoniaRisk = riskOptions[random.nextInt(3)];
+    final tbRisk = riskOptions[random.nextInt(3)];
+    final copdRisk = riskOptions[random.nextInt(3)];
+    final asthmaRisk = riskOptions[random.nextInt(3)];
+    final lungCancerRisk = riskOptions[random.nextInt(3)];
+    final arrhythmiaRisk = riskOptions[random.nextInt(3)];
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24.0),
+      child: Column(
+        children: [
+          const SizedBox(height: 20),
+          const Text(
+            'Health Risk Analysis',
+            style: TextStyle(
+              fontSize: 28,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Test Position: $positionText',
+            style: const TextStyle(
+              fontSize: 16,
+              color: Colors.white70,
+            ),
+          ),
+          const SizedBox(height: 32),
+          
+          // Lung-related conditions
+          if (_selectedPosition == StethPosition.lungs) ...[
+            Row(
+              children: [
+                Expanded(child: _buildCircularRiskIndicator('Pneumonia', pneumoniaRisk)),
+                const SizedBox(width: 16),
+                Expanded(child: _buildCircularRiskIndicator('TB', tbRisk)),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(child: _buildCircularRiskIndicator('COPD', copdRisk)),
+                const SizedBox(width: 16),
+                Expanded(child: _buildCircularRiskIndicator('Asthma', asthmaRisk)),
+              ],
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                Expanded(child: _buildCircularRiskIndicator('Lung Cancer', lungCancerRisk)),
+                const SizedBox(width: 16),
+                Expanded(child: _buildLockedIndicator('Arrhythmia', 'Test Heart First')),
+              ],
+            ),
+          ],
+          
+          // Heart-related conditions
+          if (_selectedPosition == StethPosition.heart) ...[
+            _buildCircularRiskIndicator('Arrhythmia', arrhythmiaRisk, large: true),
+            const SizedBox(height: 24),
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                color: Colors.blue.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.blue.withOpacity(0.3)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.info_outline, color: Colors.blue, size: 24),
+                  SizedBox(width: 16),
+                  Expanded(
+                    child: Text(
+                      'For complete lung condition analysis, please also test your lungs.',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+          
+          const SizedBox(height: 32),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () async {
+                  await _generateAndSharePDF();
+                },
+                icon: const Icon(Icons.picture_as_pdf, size: 20),
+                label: const Text(
+                  'Generate PDF',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+              ElevatedButton.icon(
+                onPressed: _resetFlow,
+                icon: const Icon(Icons.refresh, size: 20),
+                label: const Text(
+                  'New Test',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.black,
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildCircularRiskIndicator(String condition, int risk, {bool large = false}) {
+    final size = large ? 200.0 : 140.0;
+    final fontSize = large ? 36.0 : 28.0;
+    
+    Color riskColor;
+    if (risk == 0) {
+      riskColor = Colors.green;
+    } else if (risk <= 5) {
+      riskColor = Colors.orange;
+    } else {
+      riskColor = Colors.red;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade900,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: riskColor.withOpacity(0.3)),
+      ),
+      child: Column(
+        children: [
+          Text(
+            condition,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.white,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: size,
+            height: size,
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                SizedBox(
+                  width: size,
+                  height: size,
+                  child: CircularProgressIndicator(
+                    value: risk / 100,
+                    strokeWidth: 12,
+                    backgroundColor: Colors.grey.shade800,
+                    valueColor: AlwaysStoppedAnimation<Color>(riskColor),
+                  ),
+                ),
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Text(
+                      '$risk%',
+                      style: TextStyle(
+                        fontSize: fontSize,
+                        fontWeight: FontWeight.bold,
+                        color: riskColor,
+                      ),
+                    ),
+                    const Text(
+                      'Risk',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.white60,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLockedIndicator(String condition, String message) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade900,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.grey.withOpacity(0.3)),
+      ),
+      child: Column(
+        children: [
+          Text(
+            condition,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.white70,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: 140,
+            height: 140,
+            child: Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.grey.shade800,
+              ),
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    Icons.lock_outline,
+                    size: 40,
+                    color: Colors.white60,
+                  ),
+                  SizedBox(height: 8),
+                  Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 16),
+                    child: Text(
+                      'Test Heart First',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.white60,
+                      ),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildResultsScreen() {
+    if (_demoMode) {
+      return _buildDemoResultsScreen();
+    }
+
     final positionText = _selectedPosition == StethPosition.lungs ? 'Lungs' : 'Heart';
     final recommendation = _riskPercentage! <= 5
         ? 'No need to consult a doctor. Continue with quarterly checkups.'
