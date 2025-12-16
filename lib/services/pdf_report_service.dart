@@ -3,6 +3,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:printing/printing.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../models/user_profile.dart';
 import 'package:intl/intl.dart';
 
@@ -325,6 +326,51 @@ class PdfReportService {
         ),
       ],
     );
+  }
+
+  // Save PDF to Downloads folder
+  static Future<String?> savePdfToDownloads(File pdfFile) async {
+    try {
+      // Request storage permission
+      var status = await Permission.storage.status;
+      if (!status.isGranted) {
+        status = await Permission.storage.request();
+        if (!status.isGranted) {
+          // For Android 13+, use manageExternalStorage or photos permission
+          status = await Permission.manageExternalStorage.request();
+          if (!status.isGranted) {
+            return null;
+          }
+        }
+      }
+
+      // Get Downloads directory
+      Directory? downloadsDir;
+      if (Platform.isAndroid) {
+        // For Android, use the public Downloads folder
+        downloadsDir = Directory('/storage/emulated/0/Download');
+        if (!await downloadsDir.exists()) {
+          downloadsDir = await getExternalStorageDirectory();
+        }
+      } else {
+        downloadsDir = await getApplicationDocumentsDirectory();
+      }
+
+      if (downloadsDir == null) return null;
+
+      // Create unique filename with timestamp
+      final timestamp = DateFormat('yyyyMMdd_HHmmss').format(DateTime.now());
+      final fileName = 'StethApp_Report_$timestamp.pdf';
+      final filePath = '${downloadsDir.path}/$fileName';
+
+      // Copy file to Downloads
+      final savedFile = await pdfFile.copy(filePath);
+      
+      return savedFile.path;
+    } catch (e) {
+      print('Error saving PDF: $e');
+      return null;
+    }
   }
 
   // Share or preview PDF

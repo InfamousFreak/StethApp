@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
 import 'dart:math' as math;
+import 'package:shared_preferences/shared_preferences.dart';
 import 'language_provider.dart';
+import 'login_page.dart';
 import 'services/firebase_service.dart';
 import 'services/pdf_report_service.dart';
 import 'services/device_service.dart';
 import 'services/prediction_service.dart';
 import 'pages/patient_history_page.dart';
-import 'pages/test_firebase_page.dart';
 
 enum ConnectionStep {
   initial,
@@ -109,40 +110,18 @@ class _HomePageState extends State<HomePage> {
       );
 
       if (device != null && device.isActive) {
-        // Device found and active!
+        // Device found and active - always go to selection screen
         setState(() {
           _activeDevice = device;
           _isConnected = true;
+          _currentStep = ConnectionStep.selectPosition;
         });
 
-        // Auto-detect position based on what's active
-        if (device.isHeartMode) {
-          _showToast(
-            'Device connected - Heart mode detected',
-            backgroundColor: Colors.green,
-            icon: Icons.favorite,
-          );
-          await Future.delayed(const Duration(milliseconds: 500));
-          _selectPosition(StethPosition.heart);
-        } else if (device.isLungMode) {
-          _showToast(
-            'Device connected - Lung mode detected',
-            backgroundColor: Colors.green,
-            icon: Icons.air,
-          );
-          await Future.delayed(const Duration(milliseconds: 500));
-          _selectPosition(StethPosition.lungs);
-        } else {
-          // Device active but position unclear, let user choose
-          setState(() {
-            _currentStep = ConnectionStep.selectPosition;
-          });
-          _showToast(
-            'Device connected',
-            backgroundColor: Colors.green,
-            icon: Icons.check_circle,
-          );
-        }
+        _showToast(
+          'Device connected',
+          backgroundColor: Colors.green,
+          icon: Icons.check_circle,
+        );
       } else {
         // No device found after 5 seconds
         setState(() {
@@ -225,6 +204,11 @@ class _HomePageState extends State<HomePage> {
               _rmsData.add(rmsValue);
               _frequencyData.add((rmsValue * 1000).toInt());
               
+              // Show waveform as soon as we get first data
+              if (!_showWaveform) {
+                _showWaveform = true;
+              }
+              
               print('📊 Data collected: ${_rmsData.length} samples | Latest RMS: $rmsValue | Frequency: ${(rmsValue * 1000).toInt()}');
               
               // Keep last 200 readings for analysis
@@ -242,16 +226,7 @@ class _HomePageState extends State<HomePage> {
       });
     }
 
-    // Show waveform after 5 seconds
-    Future.delayed(const Duration(seconds: 5), () {
-      if (mounted && _currentStep == ConnectionStep.listening) {
-        setState(() {
-          _showWaveform = true;
-        });
-      }
-    });
-
-    // Start countdown
+    // Start countdown immediately
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       setState(() {
         _listeningCountdown--;
@@ -356,6 +331,19 @@ class _HomePageState extends State<HomePage> {
       _showWaveform = false;
     });
     _countdownTimer?.cancel();
+    _deviceSubscription?.cancel();
+  }
+
+  void _cancelListening() {
+    _countdownTimer?.cancel();
+    _deviceSubscription?.cancel();
+    setState(() {
+      _currentStep = ConnectionStep.selectPosition;
+      _listeningCountdown = 25;
+      _showWaveform = false;
+      _frequencyData = [];
+      _rmsData = [];
+    });
   }
 
   Future<void> _generateAndSharePDF() async {
@@ -406,14 +394,22 @@ class _HomePageState extends State<HomePage> {
 
       if (mounted) Navigator.pop(context);
 
-      // Share PDF
-      await PdfReportService.sharePdf(pdfFile);
+      // Save PDF to Downloads
+      final savedPath = await PdfReportService.savePdfToDownloads(pdfFile);
 
-      _showToast(
-        'PDF report generated',
-        backgroundColor: Colors.green,
-        icon: Icons.check_circle,
-      );
+      if (savedPath != null) {
+        _showToast(
+          'PDF saved to Downloads folder',
+          backgroundColor: Colors.green,
+          icon: Icons.check_circle,
+        );
+      } else {
+        _showToast(
+          'Failed to save PDF. Check storage permissions.',
+          backgroundColor: Colors.orange,
+          icon: Icons.warning,
+        );
+      }
     } catch (e) {
       if (mounted) Navigator.pop(context);
       _showToast(
@@ -486,65 +482,200 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        title: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Image.asset('assets/icon/co-logo.png', width: 32, height: 32),
-            const SizedBox(width: 8),
-            const Text(
-              'AI Stethoscope',
-              style: TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-        backgroundColor: Colors.grey.shade900,
-        elevation: 0,
-        centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.history),
-            tooltip: 'Patient History',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => const PatientHistoryPage(),
+    return WillPopScope(
+      onWillPop: () async {
+        // Handle back button/gesture based on current step
+        if (_currentStep == ConnectionStep.results) {
+          _resetFlow();
+          return false;
+        } else if (_currentStep == ConnectionStep.listening) {
+          _cancelListening();
+          return false;
+        } else if (_currentStep == ConnectionStep.selectPosition) {
+          setState(() {
+            _currentStep = ConnectionStep.initial;
+          });
+          return false;
+        } else if (_currentStep == ConnectionStep.connecting) {
+          setState(() {
+            _currentStep = ConnectionStep.initial;
+          });
+          return false;
+        }
+        // Allow exit only from initial screen
+        return true;
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        appBar: AppBar(
+          leading: _currentStep != ConnectionStep.initial
+              ? IconButton(
+                  icon: const Icon(Icons.arrow_back),
+                  onPressed: () {
+                    if (_currentStep == ConnectionStep.results) {
+                      _resetFlow();
+                    } else if (_currentStep == ConnectionStep.listening) {
+                      _cancelListening();
+                    } else if (_currentStep == ConnectionStep.selectPosition) {
+                      setState(() {
+                        _currentStep = ConnectionStep.initial;
+                      });
+                    } else if (_currentStep == ConnectionStep.connecting) {
+                      setState(() {
+                        _currentStep = ConnectionStep.initial;
+                      });
+                    }
+                  },
+                )
+              : null,
+          title: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Image.asset('assets/icon/co-logo.png', width: 32, height: 32),
+              const SizedBox(width: 8),
+              const Text(
+                'AI Stethoscope',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.bold,
                 ),
-              );
-            },
+              ),
+            ],
           ),
-          _buildLanguageSelector(context),
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Sign Out',
-            onPressed: () async {
-              await FirebaseService().signOut();
-              if (mounted) {
-                Navigator.of(context).pushReplacementNamed('/login');
-              }
-            },
+          backgroundColor: Colors.grey.shade900,
+          elevation: 0,
+          centerTitle: true,
+        ),
+        endDrawer: Drawer(
+          backgroundColor: Colors.grey.shade900,
+          child: ListView(
+            padding: EdgeInsets.zero,
+            children: [
+              DrawerHeader(
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade800,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Image.asset('assets/icon/co-logo.png', width: 50, height: 50),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'AI Stethoscope',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      FirebaseService().currentUser?.email ?? '',
+                      style: TextStyle(
+                        color: Colors.grey.shade400,
+                        fontSize: 12,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.history, color: Colors.white),
+                title: const Text(
+                  'Patient History',
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                ),
+                onTap: () {
+                  Navigator.pop(context); // Close drawer
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (context) => const PatientHistoryPage(),
+                    ),
+                  );
+                },
+              ),
+              const Divider(color: Colors.grey),
+              ExpansionTile(
+                leading: const Icon(Icons.language, color: Colors.white),
+                title: const Text(
+                  'Language',
+                  style: TextStyle(color: Colors.white, fontSize: 16),
+                ),
+                children: [
+                  _buildLanguageOption('en', 'English'),
+                  _buildLanguageOption('fr', 'Français'),
+                  _buildLanguageOption('de', 'Deutsch'),
+                  _buildLanguageOption('es', 'Español'),
+                  _buildLanguageOption('hi', 'हिन्दी'),
+                ],
+              ),
+              const Divider(color: Colors.grey),
+              ListTile(
+                leading: const Icon(Icons.logout, color: Colors.red),
+                title: const Text(
+                  'Sign Out',
+                  style: TextStyle(color: Colors.red, fontSize: 16),
+                ),
+                onTap: () async {
+                  Navigator.pop(context); // Close drawer
+                  
+                  // Clear saved credentials
+                  final prefs = await SharedPreferences.getInstance();
+                  await prefs.remove('saved_email');
+                  await prefs.remove('saved_password');
+                  await prefs.setBool('remember_me', false);
+                  
+                  // Sign out from Firebase
+                  await FirebaseService().signOut();
+                  
+                  if (mounted) {
+                    // Navigate to login page
+                    Navigator.of(context).pushAndRemoveUntil(
+                      MaterialPageRoute(
+                        builder: (context) => LoginPage(languageProvider: widget.languageProvider),
+                      ),
+                      (route) => false,
+                    );
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
+      body: _buildBody(),
+      ),
+    );
+  }
+
+  Widget _buildLanguageOption(String code, String name) {
+    final isSelected = widget.languageProvider.currentLanguageCode == code;
+    return ListTile(
+      contentPadding: const EdgeInsets.only(left: 72),
+      title: Row(
+        children: [
+          Icon(
+            isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+            color: isSelected ? Colors.green : Colors.grey,
+            size: 20,
+          ),
+          const SizedBox(width: 12),
+          Text(
+            name,
+            style: TextStyle(
+              color: isSelected ? Colors.green : Colors.white,
+              fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            ),
           ),
         ],
       ),
-      body: _buildBody(),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          Navigator.push(
-            context,
-            MaterialPageRoute(
-              builder: (context) => const TestFirebasePage(),
-            ),
-          );
-        },
-        tooltip: 'Test Firebase Data',
-        child: const Icon(Icons.bug_report),
-      ),
+      onTap: () {
+        widget.languageProvider.setLanguage(code);
+        Navigator.pop(context); // Close drawer after selection
+      },
     );
   }
 
@@ -716,29 +847,65 @@ class _HomePageState extends State<HomePage> {
     required String title,
     required Color color,
   }) {
+    // Check if data is available for this position
+    final bool hasData = _activeDevice != null && 
+        (position == StethPosition.heart 
+            ? _activeDevice!.heartActive 
+            : _activeDevice!.lungActive);
+    
+    final bool isDisabled = !hasData;
+
     return GestureDetector(
-      onTap: () => _selectPosition(position),
-      child: Container(
-        height: 200,
-        decoration: BoxDecoration(
-          color: Colors.grey.shade900,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: color.withOpacity(0.5), width: 2),
-        ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 64, color: color),
-            const SizedBox(height: 16),
-            Text(
-              title,
-              style: TextStyle(
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                color: color,
-              ),
+      onTap: isDisabled ? null : () => _selectPosition(position),
+      child: Opacity(
+        opacity: isDisabled ? 0.5 : 1.0,
+        child: Container(
+          height: 200,
+          decoration: BoxDecoration(
+            color: Colors.grey.shade900,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isDisabled ? Colors.grey.withOpacity(0.3) : color.withOpacity(0.5), 
+              width: 2
             ),
-          ],
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon, 
+                size: 64, 
+                color: isDisabled ? Colors.grey : color
+              ),
+              const SizedBox(height: 16),
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: isDisabled ? Colors.grey : color,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isDisabled 
+                      ? Colors.grey.shade800 
+                      : color.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  isDisabled ? 'Data Not Available' : 'Available',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: isDisabled ? Colors.grey.shade500 : color,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'l10n/app_localizations.dart';
 import 'home_page.dart';
 import 'language_provider.dart';
@@ -53,6 +54,22 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
     _fadeController.forward();
     _slideController.forward();
+    _loadSavedCredentials();
+  }
+
+  Future<void> _loadSavedCredentials() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedEmail = prefs.getString('saved_email');
+    final savedPassword = prefs.getString('saved_password');
+    final rememberMe = prefs.getBool('remember_me') ?? false;
+
+    if (savedEmail != null && savedPassword != null && rememberMe) {
+      setState(() {
+        _emailController.text = savedEmail;
+        _passwordController.text = savedPassword;
+        _rememberMe = true;
+      });
+    }
   }
 
   @override
@@ -87,6 +104,18 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     }
 
     setState(() => _isLoading = true);
+
+    // Save credentials if Remember Me is checked
+    final prefs = await SharedPreferences.getInstance();
+    if (_rememberMe) {
+      await prefs.setString('saved_email', _emailController.text.trim());
+      await prefs.setString('saved_password', _passwordController.text);
+      await prefs.setBool('remember_me', true);
+    } else {
+      await prefs.remove('saved_email');
+      await prefs.remove('saved_password');
+      await prefs.setBool('remember_me', false);
+    }
 
     try {
       final user = await _authService.signIn(
