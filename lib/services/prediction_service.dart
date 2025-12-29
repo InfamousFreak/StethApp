@@ -1,17 +1,22 @@
 import 'package:tflite_flutter/tflite_flutter.dart';
 import 'dart:math' as math;
+import 'local_diagnosis_service.dart';
 
 class PredictionResult {
   final int riskPercentage;
   final String diagnosis;
   final double confidence;
   final String recommendation;
+  final String status;
+  final double usedFrequency;
 
   PredictionResult({
     required this.riskPercentage,
     required this.diagnosis,
     required this.confidence,
     required this.recommendation,
+    required this.status,
+    required this.usedFrequency,
   });
 }
 
@@ -20,10 +25,11 @@ class PredictionService {
   factory PredictionService() => _instance;
   PredictionService._internal();
 
+  final LocalDiagnosisService _localDiagnosis = LocalDiagnosisService();
   Interpreter? _interpreter;
   bool _isModelLoaded = false;
 
-  // Load the TFLite model
+  // Load the TFLite model (optional fallback)
   Future<bool> loadModel() async {
     try {
       _interpreter = await Interpreter.fromAsset('assets/models/model_float.tflite');
@@ -39,60 +45,48 @@ class PredictionService {
       return true;
     } catch (e) {
       print('❌ Error loading model: $e');
+      print('✅ Using local diagnosis service instead');
       _isModelLoaded = false;
       return false;
     }
   }
 
-  // Predict from frequency data collected from device
+  // Main prediction method using local diagnosis service
   Future<PredictionResult> predictFromFrequencyData(
     List<int> frequencyData,
-    bool isHeartMode,
-  ) async {
-    if (!_isModelLoaded || _interpreter == null) {
-      print('⚠️ Model not loaded, using fallback prediction');
-      return _getFallbackPrediction(fallbackReason: 'Model not loaded');
-    }
-
+    bool isHeartMode, {
+    List<double>? rmsData,
+  }) async {
     try {
-      // Get model input requirements
-      final inputShape = _interpreter!.getInputTensor(0).shape;
-      final requiredLength = inputShape.length > 1 ? inputShape[1] : inputShape[0];
-      
-      print('Processing ${frequencyData.length} frequency readings');
-      print('Model input shape: $inputShape');
-      print('Model expects input length: $requiredLength');
+      print('🧠 Using Local AI Diagnosis Service');
+      print('📊 Processing ${frequencyData.length} frequency samples');
+      print('📈 RMS samples: ${rmsData?.length ?? 0}');
 
-      // Check if model expects audio input (large input size indicates audio model)
-      if (requiredLength > 10000) {
-        print('⚠️ Model appears to expect audio input (size: $requiredLength)');
-        print('⚠️ Frequency data not compatible, using fallback');
-        return _getFallbackPrediction(
-          fallbackReason: 'Model expects audio input, not frequency data. Model input size: $requiredLength',
-        );
-      }
+      // Use local diagnosis service (your Python logic)
+      final result = _localDiagnosis.predictFromDeviceData(
+        frequencyData: frequencyData,
+        rmsData: rmsData ?? [],
+        isHeartMode: isHeartMode,
+      );
 
-      // Prepare input data
-      final inputData = _prepareInputData(frequencyData, requiredLength);
-      
-      // Create output buffer
-      final outputShape = _interpreter!.getOutputTensor(0).shape;
-      final output = List.filled(outputShape[1], 0.0).reshape([1, outputShape[1]]);
-      
-      // Run inference
-      _interpreter!.run(inputData, output);
-      
-      // Process output
-      final predictions = output[0] as List<double>;
-      print('Model predictions: $predictions');
-      
-      return _processModelOutput(predictions, isHeartMode);
+      print('🎯 Local Diagnosis: ${result.diagnosis}');
+      print('📊 Risk: ${result.riskPercentage}%');
+      print('🎲 Confidence: ${(result.confidence * 100).toStringAsFixed(1)}%');
+      print('📡 Used Frequency: ${result.usedFrequency.toStringAsFixed(1)} Hz');
+
+      return PredictionResult(
+        riskPercentage: result.riskPercentage,
+        diagnosis: result.diagnosis,
+        confidence: result.confidence,
+        recommendation: _localDiagnosis.getRecommendation(result),
+        status: result.status,
+        usedFrequency: result.usedFrequency,
+      );
       
     } catch (e) {
-      print('❌ Prediction error: $e');
-      print('❌ Stack trace: ${StackTrace.current}');
+      print('❌ Local diagnosis error: $e');
       return _getFallbackPrediction(
-        fallbackReason: 'Prediction error: ${e.toString()}',
+        fallbackReason: 'Local diagnosis error: ${e.toString()}',
       );
     }
   }
@@ -135,41 +129,6 @@ class PredictionService {
     return [features.map((f) => [f]).toList()];
   }
 
-  // Process model output to risk assessment
-  PredictionResult _processModelOutput(List<double> predictions, bool isHeartMode) {
-    // Assuming model outputs probabilities for different classes
-    // You may need to adjust this based on your actual model output
-    
-    final maxProbability = predictions.reduce(math.max);
-    final predictedClass = predictions.indexOf(maxProbability);
-    
-    // Map to risk percentage (5% or 10% as per your requirement)
-    // High confidence in normal → 5%
-    // Lower confidence or abnormal detection → 10%
-    int riskPercentage;
-    String diagnosis;
-    String recommendation;
-    
-    if (predictedClass == 0 && maxProbability > 0.7) {
-      // Normal with high confidence
-      riskPercentage = 5;
-      diagnosis = 'Normal';
-      recommendation = 'No need to consult a doctor. Continue with quarterly checkups.';
-    } else {
-      // Abnormal or uncertain
-      riskPercentage = 10;
-      diagnosis = predictedClass == 0 ? 'Normal (Low Confidence)' : 'Abnormal Detected';
-      recommendation = 'Low risk detected. Maintain quarterly checkups for monitoring.';
-    }
-    
-    return PredictionResult(
-      riskPercentage: riskPercentage,
-      diagnosis: diagnosis,
-      confidence: maxProbability,
-      recommendation: recommendation,
-    );
-  }
-
   // Fallback prediction when model fails
   PredictionResult _getFallbackPrediction({String? fallbackReason}) {
     final random = math.Random();
@@ -186,6 +145,8 @@ class PredictionService {
       recommendation: risk == 5
           ? 'No need to consult a doctor. Continue with quarterly checkups.'
           : 'Low risk detected. Maintain quarterly checkups for monitoring.',
+      status: risk > 50 ? 'High Risk' : 'Normal',
+      usedFrequency: 80.0,
     );
   }
 

@@ -8,6 +8,7 @@ import 'services/firebase_service.dart';
 import 'services/pdf_report_service.dart';
 import 'services/device_service.dart';
 import 'services/prediction_service.dart';
+import 'services/diagnosis_test_suite.dart';
 import 'pages/patient_history_page.dart';
 
 enum ConnectionStep {
@@ -52,6 +53,33 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     _loadModel();
+    _testLocalDiagnosis(); // Test the integrated model
+  }
+
+  // Test method to verify local diagnosis integration
+  Future<void> _testLocalDiagnosis() async {
+    await Future.delayed(Duration(seconds: 1)); // Wait a bit
+    
+    // Run comprehensive test suite
+    DiagnosisTestSuite.runAllTests();
+    
+    // Test specific scenario that matches app usage
+    final testResult = DiagnosisTestSuite.testScenario(
+      name: 'FLUTTER APP INTEGRATION TEST',
+      heartRms: 0.025,
+      lungRms: 0.0,
+      heartDetect: true,
+      lungDetect: false,
+      dominantFreq: 185.0,
+    );
+    
+    if (mounted) {
+      _showToast(
+        'Local AI Ready: ${testResult.diagnosis} (${testResult.riskPercentage}%)',
+        backgroundColor: Colors.purple,
+        icon: Icons.science,
+      );
+    }
   }
 
   Future<void> _loadModel() async {
@@ -63,9 +91,21 @@ class _HomePageState extends State<HomePage> {
           backgroundColor: Colors.green,
           icon: Icons.check_circle,
         );
+      } else {
+        // Model loading failed, but local diagnosis service is ready
+        _showToast(
+          'Local AI Diagnosis Ready',
+          backgroundColor: Colors.blue,
+          icon: Icons.psychology,
+        );
       }
     } catch (e) {
       print('Error loading model: $e');
+      _showToast(
+        'Local AI Diagnosis Ready',
+        backgroundColor: Colors.blue,
+        icon: Icons.psychology,
+      );
     }
   }
 
@@ -268,11 +308,12 @@ class _HomePageState extends State<HomePage> {
     }
 
     try {
-      // Use ML model to predict from collected frequency data
+      // Use local AI diagnosis service to predict from collected data
       final isHeartMode = _selectedPosition == StethPosition.heart;
       final prediction = await PredictionService().predictFromFrequencyData(
         _frequencyData,
         isHeartMode,
+        rmsData: _rmsData, // Pass RMS data for more accurate diagnosis
       );
 
       if (mounted) {
@@ -295,9 +336,12 @@ class _HomePageState extends State<HomePage> {
         }
 
         // Log prediction details
-        print('🎯 Prediction: ${prediction.diagnosis}');
+        print('🎯 Local AI Diagnosis: ${prediction.diagnosis}');
         print('📊 Risk: ${prediction.riskPercentage}%');
         print('🎲 Confidence: ${(prediction.confidence * 100).toStringAsFixed(1)}%');
+        print('📡 Used Frequency: ${prediction.usedFrequency.toStringAsFixed(1)} Hz');
+        print('🏥 Status: ${prediction.status}');
+        print('💊 Recommendation: ${prediction.recommendation}');
       }
     } catch (e) {
       print('❌ Prediction error: $e');
